@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Distributed Browser Compute</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>Distributed Browser Compute</h1>
+          <p id="identity">Connecting...</p>
+        </div>
+        <div class="status-grid" aria-label="Runtime status">
+          <div>
+            <span>Socket</span>
+            <strong id="socketStatus">offline</strong>
+          </div>
+          <div>
+            <span>Peers</span>
+            <strong id="peerCount">0</strong>
+          </div>
+          <div>
+            <span>Chunks</span>
+            <strong id="chunkCount">0/0</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel">
+          <h2>Node</h2>
+          <label>
+            Capacity score
+            <input id="capacity" type="range" min="1" max="100" value="50">
+          </label>
+          <div class="actions">
+            <button id="registerVolunteer" type="button">Register Volunteer</button>
+            <button id="findPeers" type="button">Find Peers</button>
+          </div>
+          <ol id="peerList" class="list"></ol>
+        </aside>
+
+        <section class="panel task-panel">
+          <h2>Task</h2>
+          <textarea id="taskInput" spellcheck="false">The quick brown fox jumps over the lazy dog. This demo splits text into chunks, sends each chunk over a WebRTC DataChannel, and computes a tiny checksum-backed result in a Web Worker.</textarea>
+          <div class="controls">
+            <label>
+              Chunk bytes
+              <input id="chunkSize" type="number" min="16" max="1024" step="16" value="48">
+            </label>
+            <label>
+              Replicas
+              <input id="replicas" type="number" min="1" max="3" value="1">
+            </label>
+            <label>
+              Quorum
+              <input id="quorum" type="number" min="1" max="3" value="1">
+            </label>
+            <button id="runTask" type="button">Run Demo Task</button>
+          </div>
+          <div id="taskSummary" class="summary">No task submitted.</div>
+        </section>
+      </section>
+
+      <section class="panel">
+        <h2>Log</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

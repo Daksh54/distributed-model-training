@@ -1,0 +1,15 @@
+{
+  "name": "distributed-browser-compute",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.1",
+    "ws": "^8.18.0"
+  }
+}
