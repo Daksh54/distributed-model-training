@@ -77,6 +77,40 @@ test("queue expires stalled assignments", () => {
   assert.equal(reassignment.peerId, "peer-b");
 });
 
+test("queue can fail a single assignment without dropping other replicas", () => {
+  const queue = new ChunkQueue();
+
+  queue.submitTask({
+    taskId: "task-1",
+    submittedBy: "owner",
+    chunks: [{
+      chunkId: "chunk-1",
+      checksum: sha256Hex("payload"),
+      replicas: 2,
+      quorum: 1
+    }]
+  });
+  queue.assignChunk({
+    chunkId: "chunk-1",
+    peerId: "peer-a",
+    now: 0
+  });
+  queue.assignChunk({
+    chunkId: "chunk-1",
+    peerId: "peer-b",
+    now: 0
+  });
+
+  const failed = queue.failAssignment({
+    chunkId: "chunk-1",
+    peerId: "peer-a",
+    now: 1
+  });
+
+  assert.equal(failed.status, "in-flight");
+  assert.deepEqual(failed.assignedPeerIds, ["peer-b"]);
+});
+
 test("queue stores result hashes only after quorum", () => {
   const queue = new ChunkQueue();
   const resultHash = sha256Hex("result");

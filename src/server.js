@@ -8,6 +8,7 @@ import { config } from "./config.js";
 import { buildMerkleRoot } from "./hash.js";
 import { PeerRegistry } from "./peerRegistry.js";
 import { createStateStore } from "./stateStore.js";
+import { TrainingBarrierRegistry } from "./trainingBarrier.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,6 +24,7 @@ const contentTypes = new Map([
 
 const registry = new PeerRegistry({ stalePeerMs: config.stalePeerMs });
 const chunkQueue = new ChunkQueue({ assignmentTimeoutMs: config.chunkTimeoutMs });
+const trainingBarriers = new TrainingBarrierRegistry({ timeoutMs: config.barrierTimeoutMs });
 const stateStore = await createStateStore({
   redisUrl: config.redisUrl,
   redisKeyPrefix: config.redisKeyPrefix
@@ -68,6 +70,18 @@ function errorMessage(requestId, error) {
   };
 }
 
+function inviteTokenIsValid(token) {
+  return config.inviteTokens.size === 0 || config.inviteTokens.has(token);
+}
+
+function copyAssignmentExtensionFields(message) {
+  return Object.fromEntries(
+    ["kernel", "kernelType", "payload", "stepId", "device", "weightHash"]
+      .filter((key) => message[key] !== undefined)
+      .map((key) => [key, message[key]])
+  );
+}
+
 function taskStatusMessage(taskId) {
   const status = chunkQueue.getTaskStatus(taskId);
   const completeResultHashes = status.resultHashes.every(Boolean) ? status.resultHashes : null;
@@ -111,9 +125,24 @@ async function handleMessage(peer, raw) {
 
   switch (message.type) {
     case "register": {
+      if (!inviteTokenIsValid(message.token)) {
+        send(peer.socket, {
+          type: "error",
+          requestId,
+          message: "Invalid invite token"
+        });
+        peer.socket.close(4001, "Invalid invite token");
+        break;
+      }
+
       const updatedPeer = registry.update(peer.nodeId, {
         capacityScore: message.capacityScore,
-        role: message.role
+        role: message.role,
+        capabilities: message.capabilities,
+        consent: message.consentAccepted ? {
+          acceptedAt: new Date().toISOString(),
+          note: message.consentNote ?? null
+        } : undefined
       });
 
       send(peer.socket, {
@@ -121,7 +150,22 @@ async function handleMessage(peer, raw) {
         requestId,
         nodeId: updatedPeer.nodeId,
         role: updatedPeer.role,
-        capacityScore: updatedPeer.capacityScore
+        capacityScore: updatedPeer.capacityScore,
+        capabilities: updatedPeer.capabilities
+      });
+      break;
+    }
+
+    case "registerCapabilities": {
+      const updatedPeer = registry.update(peer.nodeId, {
+        capabilities: message.capabilities
+      });
+
+      send(peer.socket, {
+        type: "capabilitiesRegistered",
+        requestId,
+        nodeId: updatedPeer.nodeId,
+        capabilities: updatedPeer.capabilities
       });
       break;
     }
@@ -220,18 +264,158 @@ async function handleMessage(peer, raw) {
         type: "chunkAssigned",
         requestId,
         assignedBy: peer.nodeId,
-        ...assignment
+        ...assignment,
+        ...copyAssignmentExtensionFields(message)
       };
 
       send(peer.socket, {
         type: "chunkAssignment",
         requestId,
-        ...assignment
+        ...assignment,
+        ...copyAssignmentExtensionFields(message)
       });
 
       if (targetPeerId !== peer.nodeId) {
         sendToPeer(targetPeerId, controlMessage);
       }
+      break;
+    }
+
+    case "startTrainingStep": {
+      const expectedPeerIds = message.expectedPeerIds ?? [];
+
+      if (expectedPeerIds.length < config.minAgentsForStep) {
+        throw new Error(`Training step requires at least ${config.minAgentsForStep} agent(s)`);
+      }
+
+      const status = trainingBarriers.startBarrier({
+        taskId: message.taskId,
+        stepId: message.stepId,
+        expectedPeerIds,
+        ownerId: peer.nodeId
+      });
+
+      send(peer.socket, {
+        type: "trainingStepStarted",
+        requestId,
+        ...status
+      });
+      break;
+    }
+
+    case "taskKernel": {
+      if (!message.peerId) {
+        throw new Error("taskKernel requires peerId");
+      }
+
+      sendToPeer(message.peerId, {
+        type: "taskKernel",
+        requestId,
+        taskId: message.taskId,
+        stepId: message.stepId,
+        kernel: message.kernel,
+        kernelType: message.kernelType
+      });
+      break;
+    }
+
+    case "weightSync": {
+      if (!message.peerId) {
+        throw new Error("weightSync requires peerId");
+      }
+
+      sendToPeer(message.peerId, {
+        type: "weightSync",
+        requestId,
+        taskId: message.taskId,
+        stepId: message.stepId,
+        shardIndex: message.shardIndex ?? 0,
+        totalShards: message.totalShards ?? 1,
+        weightHash: message.weightHash,
+        weights: message.weights
+      });
+      break;
+    }
+
+    case "gradientReady": {
+      validateChunkResultHash(message.gradientHash);
+
+      const status = trainingBarriers.recordGradient({
+        taskId: message.taskId,
+        stepId: message.stepId,
+        peerId: message.peerId ?? peer.nodeId,
+        gradients: message.gradients,
+        gradientHash: message.gradientHash,
+        loss: message.loss,
+        byteLength: message.byteLength
+      });
+
+      send(peer.socket, {
+        type: "gradientReadyAck",
+        requestId,
+        taskId: message.taskId,
+        stepId: message.stepId,
+        status: status.status
+      });
+
+      if (status.status === "aggregated") {
+        for (const nodeId of status.expectedPeerIds) {
+          sendToPeer(nodeId, {
+            type: "aggregatedGradient",
+            taskId: message.taskId,
+            stepId: message.stepId,
+            gradientHash: status.aggregateHash,
+            gradients: status.aggregate
+          });
+          sendToPeer(nodeId, {
+            type: "barrierReached",
+            taskId: message.taskId,
+            stepId: message.stepId,
+            activeAgents: status.expectedPeerIds.length
+          });
+        }
+
+        if (status.ownerId) {
+          sendToPeer(status.ownerId, {
+            type: "barrierReached",
+            taskId: message.taskId,
+            stepId: message.stepId,
+            activeAgents: status.expectedPeerIds.length,
+            gradientHash: status.aggregateHash,
+            gradients: status.aggregate,
+            losses: status.losses
+          });
+        }
+      }
+      break;
+    }
+
+    case "gradientChunk": {
+      send(peer.socket, {
+        type: "gradientChunkAck",
+        requestId,
+        taskId: message.taskId,
+        stepId: message.stepId,
+        chunkIndex: message.chunkIndex,
+        totalChunks: message.totalChunks
+      });
+      break;
+    }
+
+    case "stepComplete": {
+      const status = trainingBarriers.markStepComplete({
+        taskId: message.taskId,
+        stepId: message.stepId,
+        peerId: message.peerId ?? peer.nodeId
+      });
+
+      send(peer.socket, {
+        type: "stepCompleteAck",
+        requestId,
+        taskId: message.taskId,
+        stepId: message.stepId,
+        status: status.status
+      });
       break;
     }
 
@@ -277,6 +461,34 @@ async function handleMessage(peer, raw) {
       }
 
       publishTaskCompletion(result.chunk.taskId);
+      break;
+    }
+
+    case "chunkFailed": {
+      const peerId = message.peerId ?? peer.nodeId;
+      const chunk = chunkQueue.failAssignment({
+        chunkId: message.chunkId,
+        peerId
+      });
+
+      registry.unassignChunk(peerId, message.chunkId);
+
+      if (chunk) {
+        await persistQueue();
+        sendToPeer(chunk.submittedBy, {
+          type: "chunkExpired",
+          peerId,
+          taskId: chunk.taskId,
+          chunkId: chunk.chunkId,
+          reason: message.error ?? "chunk_failed"
+        });
+      }
+
+      send(peer.socket, {
+        type: "chunkFailedAck",
+        requestId,
+        chunkId: message.chunkId
+      });
       break;
     }
 
@@ -413,6 +625,32 @@ setInterval(() => {
 
   if (expiredAssignments.length > 0) {
     void persistQueue();
+  }
+}, 1000).unref();
+
+setInterval(() => {
+  const rollbacks = trainingBarriers.expire();
+
+  for (const rollback of rollbacks) {
+    if (rollback.ownerId) {
+      sendToPeer(rollback.ownerId, {
+        type: "stepRollback",
+        taskId: rollback.taskId,
+        stepId: rollback.stepId,
+        reason: rollback.reason,
+        missingPeerIds: rollback.missingPeerIds
+      });
+    }
+
+    for (const nodeId of rollback.expectedPeerIds) {
+      sendToPeer(nodeId, {
+        type: "stepRollback",
+        taskId: rollback.taskId,
+        stepId: rollback.stepId,
+        reason: rollback.reason,
+        missingPeerIds: rollback.missingPeerIds
+      });
+    }
   }
 }, 1000).unref();
 

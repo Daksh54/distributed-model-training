@@ -21,7 +21,14 @@ export class PeerRegistry {
     this.peers = new Map();
   }
 
-  connect(socket, { nodeId, capacityScore = 0, role = "volunteer", now = Date.now() } = {}) {
+  connect(socket, {
+    nodeId,
+    capacityScore = 0,
+    role = "volunteer",
+    capabilities = null,
+    consent = null,
+    now = Date.now()
+  } = {}) {
     const nextNodeId = nodeId || this.idFactory();
     const existingPeer = this.peers.get(nextNodeId);
 
@@ -34,6 +41,8 @@ export class PeerRegistry {
       socket,
       capacityScore: Number(capacityScore) || 0,
       role,
+      capabilities: capabilities ?? existingPeer?.capabilities ?? null,
+      consent: consent ?? existingPeer?.consent ?? null,
       lastHeartbeat: now,
       assignedChunkIds: toAssignedChunkIds(existingPeer?.assignedChunkIds)
     };
@@ -42,7 +51,7 @@ export class PeerRegistry {
     return peer;
   }
 
-  update(nodeId, { capacityScore, role, now = Date.now() } = {}) {
+  update(nodeId, { capacityScore, role, capabilities, consent, now = Date.now() } = {}) {
     const peer = this.requirePeer(nodeId);
 
     if (capacityScore !== undefined) {
@@ -51,6 +60,14 @@ export class PeerRegistry {
 
     if (role) {
       peer.role = role;
+    }
+
+    if (capabilities !== undefined) {
+      peer.capabilities = capabilities;
+    }
+
+    if (consent !== undefined) {
+      peer.consent = consent;
     }
 
     peer.lastHeartbeat = now;
@@ -124,7 +141,10 @@ export class PeerRegistry {
       .slice(0, limit)
       .map((peer) => ({
         nodeId: peer.nodeId,
+        role: peer.role,
         capacityScore: peer.capacityScore,
+        capabilities: peer.capabilities,
+        consent: peer.consent,
         lastHeartbeat: peer.lastHeartbeat,
         assignedChunkIds: [...peer.assignedChunkIds]
       }));
@@ -136,6 +156,8 @@ export class PeerRegistry {
         nodeId: peer.nodeId,
         capacityScore: peer.capacityScore,
         role: peer.role,
+        capabilities: peer.capabilities,
+        consent: peer.consent,
         lastHeartbeat: peer.lastHeartbeat,
         assignedChunkIds: [...peer.assignedChunkIds]
       }))

@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "agent": "node agent/index.js",
+    "coordinator": "node src/coordinator.js",
     "test": "node --test"
   },
   "dependencies": {

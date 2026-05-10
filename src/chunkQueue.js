@@ -179,6 +179,20 @@ export class ChunkQueue {
     };
   }
 
+  failAssignment({ chunkId, peerId, now = Date.now() }) {
+    const chunk = this.requireChunk(chunkId);
+
+    if (!chunk.assignments[peerId]) {
+      return null;
+    }
+
+    delete chunk.assignments[peerId];
+    this.refreshStatus(chunk);
+    chunk.updatedAt = now;
+
+    return this.publicChunk(chunk);
+  }
+
   requeuePeer(peerId, now = Date.now()) {
     const requeued = [];
 

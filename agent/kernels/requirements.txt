@@ -1,0 +1,2 @@
+# The default training kernel is stdlib-only so CPU agents can run immediately.
+# Install torch/numpy here when replacing train_chunk.py with a PyTorch model.

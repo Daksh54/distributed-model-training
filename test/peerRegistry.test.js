@@ -55,3 +55,26 @@ test("registry maintains assigned chunk IDs", () => {
 
   assert.deepEqual(registry.snapshot().peers[0].assignedChunkIds, []);
 });
+
+test("registry stores native agent capabilities", () => {
+  const registry = new PeerRegistry();
+
+  registry.connect(socket(), {
+    nodeId: "agent-a",
+    role: "volunteer-native"
+  });
+  registry.update("agent-a", {
+    capabilities: {
+      cpuCores: 8,
+      memGB: 16,
+      gpu: { type: "cuda", vramGB: 8 }
+    }
+  });
+
+  const [agent] = registry.getAvailablePeers({
+    role: "volunteer-native"
+  });
+
+  assert.equal(agent.capabilities.gpu.type, "cuda");
+  assert.equal(registry.snapshot().peers[0].capabilities.cpuCores, 8);
+});
