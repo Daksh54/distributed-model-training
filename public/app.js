@@ -1,3 +1,8 @@
+import {
+  bytesToTrainingPayload,
+  encodeTrainingPayload
+} from "/browserTrainingKernel.js";
+
 const elements = {
   identity: document.querySelector("#identity"),
   socketStatus: document.querySelector("#socketStatus"),
@@ -366,8 +371,13 @@ async function buildTaskChunks() {
   state.chunks.clear();
 
   for (let index = 0; index < byteChunks.length; index += 1) {
-    const payload = byteChunks[index];
     const chunkId = `${taskId}:${index}`;
+    const trainingPayload = bytesToTrainingPayload(byteChunks[index], {
+      chunkId,
+      order: index * chunkSize,
+      sourceLength: bytes.byteLength
+    });
+    const payload = encodeTrainingPayload(trainingPayload);
     const checksum = await digestHex(payload);
 
     chunks.push({
@@ -489,6 +499,21 @@ async function handleDataChannelMessage(peerId, data) {
       });
       return;
     }
+
+    if (message.type === "chunkError") {
+      send({
+        type: "chunkFailed",
+        taskId: message.taskId,
+        chunkId: message.chunkId,
+        peerId,
+        error: message.error
+      });
+      log("Received chunk error", {
+        chunkId: message.chunkId,
+        error: message.error
+      });
+      return;
+    }
   }
 
   const meta = state.pendingBinaryMeta.get(peerId);
@@ -526,7 +551,14 @@ function runWorker(meta, payload, peerId) {
   worker.addEventListener("message", (event) => {
     const channel = state.channels.get(peerId);
 
-    if (!state.cancelledChunks.has(meta.chunkId) && channel?.readyState === "open") {
+    if (event.data.error && channel?.readyState === "open") {
+      channel.send(JSON.stringify({
+        type: "chunkError",
+        taskId: meta.taskId,
+        chunkId: meta.chunkId,
+        error: event.data.error
+      }));
+    } else if (!state.cancelledChunks.has(meta.chunkId) && channel?.readyState === "open") {
       channel.send(JSON.stringify({
         type: "chunkResult",
         taskId: meta.taskId,

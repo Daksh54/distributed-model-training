@@ -1,3 +1,11 @@
+import {
+  decodeTrainingPayload,
+  runTrainingChunk,
+  stableStringify
+} from "/browserTrainingKernel.js";
+
+let wasmKernelPromise;
+
 async function digestHex(buffer) {
   const hash = await crypto.subtle.digest("SHA-256", buffer);
   return [...new Uint8Array(hash)]
@@ -5,28 +13,45 @@ async function digestHex(buffer) {
     .join("");
 }
 
-async function runKernel(payload) {
-  const bytes = new Uint8Array(payload);
-  let sum = 0;
-
-  for (const byte of bytes) {
-    sum = (sum + byte) >>> 0;
+async function loadWasmKernel() {
+  if (!wasmKernelPromise) {
+    wasmKernelPromise = import("/wasm_kernel/distributed_ml_kernel.js")
+      .then(async (module) => {
+        await module.default();
+        return module;
+      })
+      .catch(() => null);
   }
 
-  const resultBuffer = new ArrayBuffer(4);
-  new DataView(resultBuffer).setUint32(0, sum);
+  return wasmKernelPromise;
+}
+
+async function runKernel(payloadBuffer) {
+  const payload = decodeTrainingPayload(payloadBuffer);
+  const wasmKernel = await loadWasmKernel();
+  const result = wasmKernel?.run_training_chunk
+    ? JSON.parse(wasmKernel.run_training_chunk(stableStringify(payload)))
+    : runTrainingChunk(payload);
+  const resultBytes = new TextEncoder().encode(stableStringify(result));
 
   return {
-    result: sum,
-    resultHash: await digestHex(resultBuffer)
+    result,
+    resultHash: await digestHex(resultBytes)
   };
 }
 
 self.addEventListener("message", async (event) => {
-  const output = await runKernel(event.data.payload);
+  try {
+    const output = await runKernel(event.data.payload);
 
-  self.postMessage({
-    chunkId: event.data.chunkId,
-    ...output
-  });
+    self.postMessage({
+      chunkId: event.data.chunkId,
+      ...output
+    });
+  } catch (error) {
+    self.postMessage({
+      chunkId: event.data.chunkId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 });

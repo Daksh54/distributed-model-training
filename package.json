@@ -8,6 +8,7 @@
     "dev": "node --watch src/server.js",
     "agent": "node agent/index.js",
     "coordinator": "node src/coordinator.js",
+    "wasm:build": "wasm-pack build wasm-kernel --target web --release --out-dir ../public/wasm_kernel",
     "test": "node --test"
   },
   "dependencies": {

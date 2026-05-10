@@ -21,7 +21,21 @@ npm install
 npm start
 ```
 
-Open `http://localhost:3000` in two browser tabs. Both tabs register as volunteer nodes by default. In one tab, click **Find Peers**, then **Run Demo Task**. The task payload is chunked locally, assigned by the server, sent directly over WebRTC data channels, processed in a Web Worker, and confirmed back to the server by result hash.
+Open `http://localhost:3000` in two browser tabs. Both tabs register as volunteer nodes by default. In one tab, click **Find Peers**, then **Run Demo Task**. The task text is converted into tiny supervised training batches, assigned by the server, sent directly over WebRTC data channels, processed in a Web Worker, and confirmed back to the server by result hash.
+
+## Browser Wasm Kernel
+
+The browser worker now runs a real forward/backward pass for a tiny single-neuron MSE model instead of the old byte-sum placeholder. It accepts a JSON mini-batch with `features`, `labels`, `weights`, and `bias`, then returns loss and gradients.
+
+By default this runs through `public/browserTrainingKernel.js`, so the demo works without a Rust toolchain. To use the Rust/Wasm path:
+
+```bash
+cargo install wasm-pack
+npm run wasm:build
+npm start
+```
+
+`npm run wasm:build` compiles `wasm-kernel/` and writes the generated module to `public/wasm_kernel/`. `public/worker.js` loads `/wasm_kernel/distributed_ml_kernel.js` when present and falls back to the JavaScript kernel if it is missing.
 
 ## Native Training Foundation
 
@@ -115,4 +129,4 @@ Server to client:
 
 ## Wasm Slot
 
-The browser worker currently runs a trivial sum kernel so the WebRTC and chunking path can be tested without a Rust toolchain. Replace the fallback in `public/worker.js` with a `wasm-pack` generated module when the Rust kernel is ready.
+The checked-in Rust source is intentionally small: it proves the browser can execute ML-shaped training work over Wasm. It is not yet a general PyTorch replacement or a large-model trainer. The next step is extending the payload schema from a single neuron to multi-layer tensors, then adding the consent UI and TURN relay before public deployment.
