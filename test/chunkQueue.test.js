@@ -43,6 +43,7 @@ test("queue requeues chunks when a peer disappears", () => {
   const requeued = queue.requeuePeer("peer-a", 10);
 
   assert.equal(requeued[0].status, "pending");
+  assert.equal(requeued[0].attempts, 0);
   assert.equal(queue.getTaskStatus("task-1").counts.pending, 1);
 });
 
@@ -65,6 +66,15 @@ test("queue expires stalled assignments", () => {
 
   assert.equal(expired[0].peerId, "peer-a");
   assert.equal(queue.getTaskStatus("task-1").counts.pending, 1);
+
+  const reassignment = queue.assignNext({
+    taskId: "task-1",
+    peerId: "peer-b",
+    now: 32
+  });
+
+  assert.equal(reassignment.chunkId, "chunk-1");
+  assert.equal(reassignment.peerId, "peer-b");
 });
 
 test("queue stores result hashes only after quorum", () => {
@@ -111,4 +121,55 @@ test("queue stores result hashes only after quorum", () => {
 
   assert.equal(secondVote.done, true);
   assert.equal(queue.getTaskStatus("task-1").resultHashes[0], resultHash);
+});
+
+test("queue returns peers to cancel when quorum completes early", () => {
+  const queue = new ChunkQueue();
+  const resultHash = sha256Hex("result");
+
+  queue.submitTask({
+    taskId: "task-1",
+    submittedBy: "owner",
+    chunks: [{
+      chunkId: "chunk-1",
+      checksum: sha256Hex("payload"),
+      replicas: 3,
+      quorum: 2
+    }]
+  });
+  queue.assignChunk({
+    chunkId: "chunk-1",
+    peerId: "peer-a",
+    now: 0
+  });
+  queue.assignChunk({
+    chunkId: "chunk-1",
+    peerId: "peer-b",
+    now: 0
+  });
+  queue.assignChunk({
+    chunkId: "chunk-1",
+    peerId: "peer-c",
+    now: 0
+  });
+
+  const firstVote = queue.markResult({
+    chunkId: "chunk-1",
+    peerId: "peer-a",
+    resultHash,
+    now: 1
+  });
+  const secondVote = queue.markResult({
+    chunkId: "chunk-1",
+    peerId: "peer-b",
+    resultHash,
+    now: 2
+  });
+  const status = queue.getTaskStatus("task-1");
+
+  assert.deepEqual(firstVote.cancelledPeers, []);
+  assert.deepEqual(secondVote.cancelledPeers, ["peer-c"]);
+  assert.equal(secondVote.done, true);
+  assert.equal(status.counts.done, 1);
+  assert.deepEqual(status.chunks[0].assignedPeerIds, []);
 });

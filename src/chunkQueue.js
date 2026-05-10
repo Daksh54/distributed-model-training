@@ -186,6 +186,9 @@ export class ChunkQueue {
       if (chunk.assignments[peerId]) {
         delete chunk.assignments[peerId];
         this.refreshStatus(chunk);
+        if (chunk.status === STATUS_PENDING) {
+          chunk.attempts = 0;
+        }
         chunk.updatedAt = now;
         requeued.push(this.publicChunk(chunk));
       }

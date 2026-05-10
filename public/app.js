@@ -25,9 +25,14 @@ const state = {
   channels: new Map(),
   pendingBinaryMeta: new Map(),
   chunks: new Map(),
+  activeWorkers: new Map(),
+  cancelledChunks: new Set(),
   activeTaskId: null,
   doneChunks: 0,
-  totalChunks: 0
+  totalChunks: 0,
+  dispatchedPeerCount: 0,
+  retryEvents: 0,
+  lastRetryEvent: null
 };
 
 localStorage.setItem("dbc.nodeId", state.nodeId);
@@ -53,6 +58,26 @@ function updateIdentity() {
 
 function updateTaskProgress() {
   elements.chunkCount.textContent = `${state.doneChunks}/${state.totalChunks}`;
+}
+
+function updateTaskSummary(statusText) {
+  const parts = [statusText];
+
+  if (state.retryEvents > 0) {
+    parts.push(`${state.retryEvents} retry event(s)`);
+  }
+
+  if (state.lastRetryEvent) {
+    parts.push(`latest: ${state.lastRetryEvent}`);
+  }
+
+  elements.taskSummary.textContent = parts.join(". ");
+}
+
+function noteRetryEvent(message) {
+  state.retryEvents += 1;
+  state.lastRetryEvent = message;
+  updateTaskSummary(`Task ${state.activeTaskId} is running on ${state.dispatchedPeerCount} peer(s)`);
 }
 
 function capacityScore() {
@@ -121,6 +146,9 @@ async function handleServerMessage(message) {
       state.activeTaskId = message.taskId;
       state.totalChunks = message.totalChunks;
       state.doneChunks = 0;
+      state.dispatchedPeerCount = 0;
+      state.retryEvents = 0;
+      state.lastRetryEvent = null;
       updateTaskProgress();
       state.peers = message.peers;
       renderPeers();
@@ -156,15 +184,24 @@ async function handleServerMessage(message) {
       break;
 
     case "taskComplete":
-      elements.taskSummary.textContent = `Task complete. Merkle root: ${message.merkleRoot}`;
+      updateTaskSummary(`Task complete. Merkle root: ${message.merkleRoot}`);
       log("Task complete", {
         merkleRoot: message.merkleRoot
       });
       break;
 
     case "peerEvicted":
-    case "chunkExpired":
+      noteRetryEvent(`peer ${message.nodeId} dropped chunk ${message.chunkId}`);
       log(message.type, message);
+      break;
+
+    case "chunkExpired":
+      noteRetryEvent(`chunk ${message.chunkId} expired on peer ${message.peerId}`);
+      log(message.type, message);
+      break;
+
+    case "cancelChunk":
+      cancelActiveChunk(message.chunkId, message.reason);
       break;
 
     case "error":
@@ -189,7 +226,14 @@ function renderPeers() {
 
 function createPeerConnection(peerId, initiator) {
   if (state.peerConnections.has(peerId)) {
-    return state.peerConnections.get(peerId);
+    const existingConnection = state.peerConnections.get(peerId);
+    const existingChannel = state.channels.get(peerId);
+
+    if (initiator && (!existingChannel || ["closing", "closed"].includes(existingChannel.readyState))) {
+      setupChannel(peerId, existingConnection.createDataChannel("chunks"));
+    }
+
+    return existingConnection;
   }
 
   const connection = new RTCPeerConnection({
@@ -346,17 +390,43 @@ async function buildTaskChunks() {
 
 async function dispatchChunks(peers) {
   if (peers.length === 0) {
-    elements.taskSummary.textContent = "No volunteer peers are currently available.";
+    updateTaskSummary("No volunteer peers are currently available");
     return;
   }
 
-  const channels = new Map();
+  const channelAttempts = await Promise.allSettled(peers.map(async (peer) => ({
+    peer,
+    channel: await ensureChannel(peer.nodeId)
+  })));
 
-  for (const peer of peers) {
-    channels.set(peer.nodeId, await ensureChannel(peer.nodeId));
+  const readyPeers = [];
+
+  for (const attempt of channelAttempts) {
+    if (attempt.status === "rejected") {
+      log("Unable to open DataChannel", {
+        error: attempt.reason instanceof Error ? attempt.reason.message : String(attempt.reason)
+      });
+      continue;
+    }
+
+    const { peer, channel } = attempt.value;
+
+    if (channel.readyState === "open") {
+      readyPeers.push(peer);
+    } else {
+      log("DataChannel was not ready for dispatch", {
+        peerId: peer.nodeId,
+        readyState: channel.readyState
+      });
+    }
   }
 
-  const peerIds = peers.map((peer) => peer.nodeId);
+  if (readyPeers.length === 0) {
+    updateTaskSummary("No peer DataChannels opened before dispatch");
+    return;
+  }
+
+  const peerIds = readyPeers.map((peer) => peer.nodeId);
   const chunkIds = [...state.chunks.keys()];
 
   for (let index = 0; index < chunkIds.length; index += 1) {
@@ -369,7 +439,8 @@ async function dispatchChunks(peers) {
     });
   }
 
-  elements.taskSummary.textContent = `Task ${state.activeTaskId} dispatched to ${peerIds.length} peer(s).`;
+  state.dispatchedPeerCount = peerIds.length;
+  updateTaskSummary(`Task ${state.activeTaskId} dispatched to ${peerIds.length} peer(s)`);
 }
 
 function sendChunkToPeer(assignment) {
@@ -438,14 +509,24 @@ async function handleDataChannelMessage(peerId, data) {
 }
 
 function runWorker(meta, payload, peerId) {
+  if (state.cancelledChunks.has(meta.chunkId)) {
+    state.cancelledChunks.delete(meta.chunkId);
+    log("Skipped cancelled chunk payload", {
+      chunkId: meta.chunkId
+    });
+    return;
+  }
+
   const worker = new Worker("/worker.js", {
     type: "module"
   });
 
+  state.activeWorkers.set(meta.chunkId, worker);
+
   worker.addEventListener("message", (event) => {
     const channel = state.channels.get(peerId);
 
-    if (channel?.readyState === "open") {
+    if (!state.cancelledChunks.has(meta.chunkId) && channel?.readyState === "open") {
       channel.send(JSON.stringify({
         type: "chunkResult",
         taskId: meta.taskId,
@@ -455,13 +536,44 @@ function runWorker(meta, payload, peerId) {
       }));
     }
 
+    state.cancelledChunks.delete(meta.chunkId);
+    state.activeWorkers.delete(meta.chunkId);
     worker.terminate();
+  });
+
+  worker.addEventListener("error", (event) => {
+    state.activeWorkers.delete(meta.chunkId);
+    worker.terminate();
+    log("Worker failed", {
+      chunkId: meta.chunkId,
+      message: event.message
+    });
   });
 
   worker.postMessage({
     chunkId: meta.chunkId,
     payload
   }, [payload]);
+}
+
+function cancelActiveChunk(chunkId, reason) {
+  state.cancelledChunks.add(chunkId);
+  const worker = state.activeWorkers.get(chunkId);
+
+  if (worker) {
+    worker.terminate();
+    state.activeWorkers.delete(chunkId);
+    log("Cancelled active chunk", {
+      chunkId,
+      reason
+    });
+    return;
+  }
+
+  log("Marked chunk cancelled", {
+    chunkId,
+    reason
+  });
 }
 
 elements.registerVolunteer.addEventListener("click", () => {
